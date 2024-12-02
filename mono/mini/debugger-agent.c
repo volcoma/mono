@@ -1616,14 +1616,9 @@ transport_handshake (void)
 }
 
 static void
-stop_debugger_thread (void)
+wait_for_debugger_thread_to_stop ()
 {
-	if (!agent_inited)
-		return;
-
-	transport_close1 ();
-
-	/* 
+	/*
 	 * Wait for the thread to exit.
 	 *
 	 * If we continue with the shutdown without waiting for it, then the client might
@@ -1640,6 +1635,36 @@ stop_debugger_thread (void)
 		if (debugger_thread_handle)
 			mono_thread_info_wait_one_handle (debugger_thread_handle, MONO_INFINITE_WAIT, TRUE);
 	}
+}
+
+static void
+stop_debugger_thread (void)
+{
+	if (!agent_inited)
+		return;
+
+#ifdef HOST_WIN32
+	gboolean debuggerAttached = mono_is_debugger_attached ();
+
+	// We need to make the call to mono_threads_suspend_abort_syscall to break any
+	// hung accept calls on windows.
+	MonoThreadInfo* info = mono_thread_info_lookup (debugger_thread_id);
+	if (info) {
+		mono_threads_suspend_abort_syscall (info);
+
+		// On Windows we must wait for the debugger to stop before
+		// closing the transport. !debuggerAttached means we are not in
+		// socket accept, the problematic blocking call.
+		if (!debuggerAttached)
+		{
+			wait_for_debugger_thread_to_stop ();
+		}
+	}
+
+#endif
+	transport_close1 ();
+
+	wait_for_debugger_thread_to_stop ();
 
 	transport_close2 ();
 }
@@ -2638,8 +2663,8 @@ thread_interrupt (DebuggerTlsData *tls, MonoThreadInfo *info, MonoJitInfo *ji)
 
 			// FIXME: printf is not signal safe, but this is only used during
 			// debugger debugging
-			if (ip)
-				PRINT_DEBUG_MSG (1, "[%p] Received interrupt while at %p, treating as suspended.\n", (gpointer)(gsize)tid, ip);
+			//if (ip)
+			//	PRINT_DEBUG_MSG (1, "[%p] Received interrupt while at %p, treating as suspended.\n", (gpointer)(gsize)tid, ip);
 			//save_thread_context (&ctx);
 
 			if (!tls->thread)
@@ -4194,7 +4219,7 @@ thread_end (MonoProfiler *prof, uintptr_t tid)
 	if (thread) {
 		mono_g_hash_table_remove (tid_to_thread_obj, GUINT_TO_POINTER (tid));
 		tls = (DebuggerTlsData *)mono_g_hash_table_lookup (thread_to_tls, thread);
-		if (tls) {
+		if (tls && !tls->terminated) {
 			/* FIXME: Maybe we need to free this instead, but some code can't handle that */
 			tls->terminated = TRUE;
 			/* Can't remove from tid_to_thread, as that would defeat the check in thread_start () */
@@ -10174,8 +10199,8 @@ debugger_thread (void *arg)
 		/* This will break if the socket is closed during shutdown too */
 		if (res != HEADER_LENGTH) {
 			PRINT_DEBUG_MSG (1, "[dbg] transport_recv () returned %d, expected %d.\n", res, HEADER_LENGTH);
-			command_set = (CommandSet)0;
-			command = 0;
+			command_set = CMD_SET_VM;
+			command = CMD_VM_DISPOSE;
 			dispose_vm ();
 			break;
 		} else {
