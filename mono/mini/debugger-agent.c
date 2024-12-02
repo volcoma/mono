@@ -1616,8 +1616,12 @@ transport_handshake (void)
 }
 
 static void
-wait_for_debugger_thread_to_stop ()
+stop_debugger_thread ()
 {
+	if (!agent_inited)
+		return;
+
+	transport_close1 ();
 	/*
 	 * Wait for the thread to exit.
 	 *
@@ -1635,39 +1639,10 @@ wait_for_debugger_thread_to_stop ()
 		if (debugger_thread_handle)
 			mono_thread_info_wait_one_handle (debugger_thread_handle, MONO_INFINITE_WAIT, TRUE);
 	}
-}
-
-static void
-stop_debugger_thread (void)
-{
-	if (!agent_inited)
-		return;
-
-#ifdef HOST_WIN32
-	gboolean debuggerAttached = mono_is_debugger_attached ();
-
-	// We need to make the call to mono_threads_suspend_abort_syscall to break any
-	// hung accept calls on windows.
-	MonoThreadInfo* info = mono_thread_info_lookup (debugger_thread_id);
-	if (info) {
-		mono_threads_suspend_abort_syscall (info);
-
-		// On Windows we must wait for the debugger to stop before
-		// closing the transport. !debuggerAttached means we are not in
-		// socket accept, the problematic blocking call.
-		if (!debuggerAttached)
-		{
-			wait_for_debugger_thread_to_stop ();
-		}
-	}
-
-#endif
-	transport_close1 ();
-
-	wait_for_debugger_thread_to_stop ();
-
+	
 	transport_close2 ();
 }
+
 
 static void
 start_debugger_thread (MonoError *error)
